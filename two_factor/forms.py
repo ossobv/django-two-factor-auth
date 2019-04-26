@@ -1,4 +1,5 @@
 from binascii import unhexlify
+from json import dumps, loads
 from time import time
 
 from django import forms
@@ -18,6 +19,10 @@ try:
     from otp_yubikey.models import RemoteYubikeyDevice, YubikeyDevice
 except ImportError:
     RemoteYubikeyDevice = YubikeyDevice = None
+try:
+    from django_otp_u2f.models import U2fDevice
+except ImportError:
+    U2fDevice = None
 
 
 class MethodForm(forms.Form):
@@ -84,6 +89,47 @@ class YubiKeyDeviceForm(DeviceValidationForm):
         return super(YubiKeyDeviceForm, self).clean_token()
 
 
+class U2fDeviceForm(forms.Form):
+    session_key = 'django_two_factor-u2f-challenge'
+
+    token = forms.CharField(
+        label=_('U2F'), widget=forms.HiddenInput())
+
+    class Media:
+        js = ('two_factor/js/u2f-api.js',)
+
+    error_messages = {
+        'invalid_token': _("The U2F key could not be verified."),
+    }
+
+    def __init__(self, request, *args, **kwargs):
+        self.request = request
+        super(U2fDeviceForm, self).__init__(*args, **kwargs)
+        if not self.is_bound:
+            self.challenge = U2fDevice.begin_registration(
+                self.request.user, self.request.build_absolute_uri('/')[:-1])
+            self.request.session[self.session_key] = self.challenge
+        else:
+            self.challenge = self.request.session.get(self.session_key)
+
+    @property
+    def data_for_client(self):
+        return dumps(self.challenge)
+
+    def clean(self):
+        try:
+            self.device = U2fDevice.complete_registration(
+                self.request.user, self.challenge,
+                loads(self.cleaned_data['token']), name='default')
+            self.cleaned_data['persistent_id'] = self.device.persistent_id
+        except Exception:
+            raise forms.ValidationError(self.error_messages['invalid_token'])
+        finally:
+            if self.session_key in self.request.session:
+                del self.request.session[self.session_key]
+        return self.cleaned_data
+
+
 class TOTPDeviceForm(forms.Form):
     token = forms.IntegerField(label=_("Token"), min_value=0, max_value=int('9' * totp_digits()))
 
@@ -139,6 +185,7 @@ class DisableForm(forms.Form):
 
 
 class AuthenticationTokenForm(OTPAuthenticationFormMixin, Form):
+    session_key = 'django_two_factor-u2f-challenge'
     otp_token = forms.IntegerField(label=_("Token"), min_value=1,
                                    max_value=int('9' * totp_digits()))
 
@@ -152,7 +199,7 @@ class AuthenticationTokenForm(OTPAuthenticationFormMixin, Form):
     # its own `<form>`.
     use_required_attribute = False
 
-    def __init__(self, user, initial_device, **kwargs):
+    def __init__(self, request, user, initial_device, **kwargs):
         """
         `initial_device` is either the user's default device, or the backup
         device when the user chooses to enter a backup token. The token will
@@ -160,18 +207,51 @@ class AuthenticationTokenForm(OTPAuthenticationFormMixin, Form):
         device.
         """
         super(AuthenticationTokenForm, self).__init__(**kwargs)
+        self.challenge = None
+        self.request = request
         self.user = user
+        self.initial_device = initial_device
 
         # YubiKey generates a OTP of 44 characters (not digits). So if the
         # user's primary device is a YubiKey, replace the otp_token
         # IntegerField with a CharField.
         if RemoteYubikeyDevice and YubikeyDevice and \
-                isinstance(initial_device, (RemoteYubikeyDevice, YubikeyDevice)):
-            self.fields['otp_token'] = forms.CharField(label=_('YubiKey'), widget=forms.PasswordInput())
+                isinstance(
+                    initial_device, (RemoteYubikeyDevice, YubikeyDevice)):
+            self.fields['otp_token'] = forms.CharField(
+                label=_('YubiKey'), widget=forms.PasswordInput())
+
+        if U2fDevice and isinstance(initial_device, U2fDevice):
+            self.fields['otp_token'] = forms.CharField(
+                label=_('U2F'), widget=forms.HiddenInput())
+
+            if not self.is_bound:
+                self.challenge = U2fDevice.begin_authentication(
+                    self.user,
+                    self.request.build_absolute_uri('/')[:-1])
+                self.request.session[self.session_key] = self.challenge
+            else:
+                self.challenge = self.request.session.get(self.session_key)
+
+    @property
+    def data_for_client(self):
+        return dumps(self.challenge)
+
+    def _chosen_device(self, user):
+        if self.challenge is not None:
+            self.initial_device.create_verify_token(self.challenge)
+        return self.initial_device
 
     def clean(self):
-        self.clean_otp(self.user)
+        try:
+            self.clean_otp(self.user)
+        finally:
+            if self.session_key in self.request.session:
+                del self.request.session[self.session_key]
         return self.cleaned_data
+
+    class Media:
+        js = ('two_factor/js/u2f-api.js',)
 
 
 class BackupTokenForm(AuthenticationTokenForm):

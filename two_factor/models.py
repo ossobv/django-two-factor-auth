@@ -14,9 +14,16 @@ from phonenumber_field.modelfields import PhoneNumberField
 from .gateways import make_call, send_sms
 
 try:
+    import django_otp_u2f
+except ImportError:
+    django_otp_u2f = None
+
+
+try:
     import yubiotp
 except ImportError:
     yubiotp = None
+
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +47,8 @@ def get_available_yubikey_methods():
     methods = []
     if yubiotp and 'otp_yubikey' in settings.INSTALLED_APPS:
         methods.append(('yubikey', _('YubiKey')))
+    if django_otp_u2f and 'django_otp_u2f' in settings.INSTALLED_APPS:
+        methods.append(('u2f', _('U2F')))
     return methods
 
 

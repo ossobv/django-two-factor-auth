@@ -31,7 +31,8 @@ from two_factor.utils import totp_digits
 
 from ..forms import (
     AuthenticationTokenForm, BackupTokenForm, DeviceValidationForm, MethodForm,
-    PhoneNumberForm, PhoneNumberMethodForm, TOTPDeviceForm, YubiKeyDeviceForm,
+    PhoneNumberForm, PhoneNumberMethodForm, TOTPDeviceForm, U2fDeviceForm,
+    YubiKeyDeviceForm,
 )
 from ..models import PhoneDevice, get_available_phone_methods
 from ..utils import backup_phones, default_device, get_otpauth_url
@@ -41,7 +42,10 @@ try:
     from otp_yubikey.models import ValidationService, RemoteYubikeyDevice
 except ImportError:
     ValidationService = RemoteYubikeyDevice = None
-
+try:
+    from django_otp_u2f.models import U2fDevice
+except ImportError:
+    U2fDevice = None
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +133,7 @@ class LoginView(IdempotentSessionWizardView):
             }
         if step in ('token', 'backup'):
             return {
+                'request': self.request,
                 'user': self.get_user(),
                 'initial_device': self.get_device(step),
             }
@@ -228,6 +233,7 @@ class SetupView(IdempotentSessionWizardView):
         ('call', PhoneNumberForm),
         ('validation', DeviceValidationForm),
         ('yubikey', YubiKeyDeviceForm),
+        ('u2f', U2fDeviceForm),
     )
     condition_dict = {
         'generator': lambda self: self.get_method() == 'generator',
@@ -235,9 +241,11 @@ class SetupView(IdempotentSessionWizardView):
         'sms': lambda self: self.get_method() == 'sms',
         'validation': lambda self: self.get_method() in ('sms', 'call'),
         'yubikey': lambda self: self.get_method() == 'yubikey',
+        'u2f': lambda self: self.get_method() == 'u2f',
     }
     idempotent_dict = {
         'yubikey': False,
+        'u2f': False,
     }
 
     def get_method(self):
@@ -290,11 +298,12 @@ class SetupView(IdempotentSessionWizardView):
 
         # TOTPDeviceForm
         if self.get_method() == 'generator':
-            form = [form for form in form_list if isinstance(form, TOTPDeviceForm)][0]
+            form = [form for form in form_list
+                    if isinstance(form, TOTPDeviceForm)][0]
             device = form.save()
 
         # PhoneNumberForm / YubiKeyDeviceForm
-        elif self.get_method() in ('call', 'sms', 'yubikey'):
+        elif self.get_method() in ('call', 'sms', 'yubikey', 'u2f'):
             device = self.get_device()
             device.save()
 
@@ -314,6 +323,10 @@ class SetupView(IdempotentSessionWizardView):
         if step in ('validation', 'yubikey'):
             kwargs.update({
                 'device': self.get_device()
+            })
+        if step == 'u2f':
+            kwargs.update({
+                'request': self.request,
             })
         metadata = self.get_form_metadata(step)
         if metadata:
@@ -349,6 +362,11 @@ class SetupView(IdempotentSessionWizardView):
             except ValidationService.MultipleObjectsReturned:
                 raise KeyError("Multiple ValidationService found with name 'default'")
             return RemoteYubikeyDevice(**kwargs)
+
+        if method == 'u2f':
+            persistent_id = self.storage.validated_step_data\
+                .get('u2f', {}).get('persistent_id', '')
+            return U2fDevice.from_persistent_id(persistent_id)
 
     def get_key(self, step):
         self.storage.extra_data.setdefault('keys', {})

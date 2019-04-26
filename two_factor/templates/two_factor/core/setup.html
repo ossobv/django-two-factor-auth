@@ -43,9 +43,14 @@
     <p>{% blocktrans %}To identify and verify your YubiKey, please insert a
       token in the field below. Your YubiKey will be linked to your
       account.{% endblocktrans %}</p>
+  {% elif wizard.steps.current == 'u2f' %}
+    <p>{% blocktrans %}To identify and verify your U2F device, please insert it
+      and press the button. Your U2F device will be linked to your
+      account.{% endblocktrans %}</p>
   {% endif %}
 
   <form action="" method="post">{% csrf_token %}
+    <p id='u2f-message'></p>
     {% include "two_factor/_wizard_forms.html" %}
 
     {# hidden submit button to enable [enter] key #}
@@ -53,4 +58,28 @@
 
     {% include "two_factor/_wizard_actions.html" %}
   </form>
+{% endblock %}
+
+{% block extra_javascript %}
+{{ form.media }}
+{% if wizard.steps.current == 'u2f' %}
+<script type='text/javascript'>
+    var request = {{ form.data_for_client|safe }};
+    u2f.register(request.appId, request.registerRequests, request.registeredKeys,
+        function(response) {
+            console.debug(response);
+            if (!response.errorCode) {
+                document.getElementById('id_u2f-token').value = JSON.stringify(response);
+                document.getElementById('id_u2f-token').form.submit();
+            } else if (response.errorCode == 4) {
+                $('#u2f-message').text("{{ _('This device is already registered with this account.')|escapejs }}");
+            } else if (response.errorCode == 5) {
+                $('#u2f-message').text("{{ _('The request timed out, please restart the procedure.')|escapejs }}");
+            } else {
+                $('#u2f-message').text("{{ _('Unable to register U2F Device.')|escapejs }}");
+            }
+        }
+    );
+</script>
+{% endif %}
 {% endblock %}
